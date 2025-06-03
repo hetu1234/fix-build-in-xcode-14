@@ -21,78 +21,63 @@ static std::mutex threads_mutex;
 // Map to hold all registered threads and their information
 static std::unordered_map<v8::Isolate *, ThreadInfo> threads = {};
 
+// Structure to hold stack frame information
+struct JsStackFrame {
+  std::string function_name;
+  std::string filename;
+  int lineno;
+  int colno;
+};
+
+// Type alias for a vector of JsStackFrame
+using JsStackTrace = std::vector<JsStackFrame>;
+
 // Function to be called when an isolate's execution is interrupted
 static void ExecutionInterrupted(Isolate *isolate, void *data) {
-  auto promise = static_cast<std::promise<Local<Array>> *>(data);
+  auto promise = static_cast<std::promise<JsStackTrace> *>(data);
   auto stack = StackTrace::CurrentStackTrace(isolate, kMaxStackFrames,
                                              StackTrace::kDetailed);
 
-  if (stack.IsEmpty()) {
-    promise->set_value(Array::New(isolate, 0));
-    return;
-  }
+  JsStackTrace frames;
+  if (!stack.IsEmpty()) {
+    for (int i = 0; i < stack->GetFrameCount(); i++) {
+      auto frame = stack->GetFrame(isolate, i);
+      auto fn_name = frame->GetFunctionName();
 
-  auto frames = Array::New(isolate, stack->GetFrameCount());
+      std::string function_name;
+      if (frame->IsEval()) {
+        function_name = "[eval]";
+      } else if (fn_name.IsEmpty() || fn_name->Length() == 0) {
+        function_name = "?";
+      } else if (frame->IsConstructor()) {
+        function_name = "[constructor]";
+      } else {
+        v8::String::Utf8Value utf8_fn(isolate, fn_name);
+        function_name = *utf8_fn ? *utf8_fn : "?";
+      }
 
-  for (int i = 0; i < stack->GetFrameCount(); i++) {
-    auto frame = stack->GetFrame(isolate, i);
-    auto fn_name = frame->GetFunctionName();
+      std::string filename;
+      auto script_name = frame->GetScriptName();
+      if (!script_name.IsEmpty()) {
+        v8::String::Utf8Value utf8_filename(isolate, script_name);
+        filename = *utf8_filename ? *utf8_filename : "<unknown>";
+      } else {
+        filename = "<unknown>";
+      }
 
-    if (frame->IsEval()) {
-      fn_name =
-          String::NewFromUtf8(isolate, "[eval]", NewStringType::kInternalized)
-              .ToLocalChecked();
-    } else if (fn_name.IsEmpty() || fn_name->Length() == 0) {
-      fn_name = String::NewFromUtf8(isolate, "?", NewStringType::kInternalized)
-                    .ToLocalChecked();
-    } else if (frame->IsConstructor()) {
-      fn_name = String::NewFromUtf8(isolate, "[constructor]",
-                                    NewStringType::kInternalized)
-                    .ToLocalChecked();
+      int lineno = frame->GetLineNumber();
+      int colno = frame->GetColumn();
+
+      frames.push_back(JsStackFrame{function_name, filename, lineno, colno});
     }
-
-    auto frame_obj = Object::New(isolate);
-    frame_obj
-        ->Set(isolate->GetCurrentContext(),
-              String::NewFromUtf8(isolate, "function",
-                                  NewStringType::kInternalized)
-                  .ToLocalChecked(),
-              fn_name)
-        .Check();
-
-    frame_obj
-        ->Set(isolate->GetCurrentContext(),
-              String::NewFromUtf8(isolate, "filename",
-                                  NewStringType::kInternalized)
-                  .ToLocalChecked(),
-              frame->GetScriptName())
-        .Check();
-
-    frame_obj
-        ->Set(
-            isolate->GetCurrentContext(),
-            String::NewFromUtf8(isolate, "lineno", NewStringType::kInternalized)
-                .ToLocalChecked(),
-            Integer::New(isolate, frame->GetLineNumber()))
-        .Check();
-
-    frame_obj
-        ->Set(
-            isolate->GetCurrentContext(),
-            String::NewFromUtf8(isolate, "colno", NewStringType::kInternalized)
-                .ToLocalChecked(),
-            Integer::New(isolate, frame->GetColumn()))
-        .Check();
-
-    frames->Set(isolate->GetCurrentContext(), i, frame_obj).Check();
   }
 
   promise->set_value(frames);
 }
 
 // Function to capture the stack trace of a single isolate
-Local<Array> CaptureStackTrace(Isolate *isolate) {
-  std::promise<Local<Array>> promise;
+JsStackTrace CaptureStackTrace(Isolate *isolate) {
+  std::promise<JsStackTrace> promise;
   auto future = promise.get_future();
 
   // The v8 isolate must be interrupted to capture the stack trace
@@ -105,36 +90,79 @@ Local<Array> CaptureStackTrace(Isolate *isolate) {
 void CaptureStackTraces(const FunctionCallbackInfo<Value> &args) {
   auto capture_from_isolate = args.GetIsolate();
 
-  using ThreadResult = std::tuple<std::string, Local<Array>>;
+  using ThreadResult = std::tuple<std::string, JsStackTrace>;
   std::vector<std::future<ThreadResult>> futures;
 
-  // We collect the futures into a vec so they can be processed in parallel
-  std::lock_guard<std::mutex> lock(threads_mutex);
-  for (auto [thread_isolate, thread_info] : threads) {
-    if (thread_isolate == capture_from_isolate)
-      continue;
+  {
+    std::lock_guard<std::mutex> lock(threads_mutex);
+    for (auto [thread_isolate, thread_info] : threads) {
+      if (thread_isolate == capture_from_isolate)
+        continue;
+      auto thread_name = thread_info.thread_name;
 
-    auto thread_name = thread_info.thread_name;
-
-    futures.emplace_back(std::async(
-        std::launch::async,
-        [thread_name](Isolate *isolate) -> ThreadResult {
-          return std::make_tuple(thread_name, CaptureStackTrace(isolate));
-        },
-        thread_isolate));
+      futures.emplace_back(std::async(
+          std::launch::async,
+          [thread_name](Isolate *isolate) -> ThreadResult {
+            return std::make_tuple(thread_name, CaptureStackTrace(isolate));
+          },
+          thread_isolate));
+    }
   }
 
-  // We wait for all futures to complete and collect their results into a
-  // JavaScript object
   Local<Object> result = Object::New(capture_from_isolate);
+
   for (auto &future : futures) {
     auto [thread_name, frames] = future.get();
-
     auto key = String::NewFromUtf8(capture_from_isolate, thread_name.c_str(),
                                    NewStringType::kNormal)
                    .ToLocalChecked();
 
-    result->Set(capture_from_isolate->GetCurrentContext(), key, frames).Check();
+    Local<Array> jsFrames =
+        Array::New(capture_from_isolate, static_cast<int>(frames.size()));
+    for (size_t i = 0; i < frames.size(); ++i) {
+      const auto &f = frames[i];
+      Local<Object> frameObj = Object::New(capture_from_isolate);
+      frameObj
+          ->Set(capture_from_isolate->GetCurrentContext(),
+                String::NewFromUtf8(capture_from_isolate, "function",
+                                    NewStringType::kInternalized)
+                    .ToLocalChecked(),
+                String::NewFromUtf8(capture_from_isolate,
+                                    f.function_name.c_str(),
+                                    NewStringType::kNormal)
+                    .ToLocalChecked())
+          .Check();
+      frameObj
+          ->Set(capture_from_isolate->GetCurrentContext(),
+                String::NewFromUtf8(capture_from_isolate, "filename",
+                                    NewStringType::kInternalized)
+                    .ToLocalChecked(),
+                String::NewFromUtf8(capture_from_isolate, f.filename.c_str(),
+                                    NewStringType::kNormal)
+                    .ToLocalChecked())
+          .Check();
+      frameObj
+          ->Set(capture_from_isolate->GetCurrentContext(),
+                String::NewFromUtf8(capture_from_isolate, "lineno",
+                                    NewStringType::kInternalized)
+                    .ToLocalChecked(),
+                Integer::New(capture_from_isolate, f.lineno))
+          .Check();
+      frameObj
+          ->Set(capture_from_isolate->GetCurrentContext(),
+                String::NewFromUtf8(capture_from_isolate, "colno",
+                                    NewStringType::kInternalized)
+                    .ToLocalChecked(),
+                Integer::New(capture_from_isolate, f.colno))
+          .Check();
+      jsFrames
+          ->Set(capture_from_isolate->GetCurrentContext(),
+                static_cast<uint32_t>(i), frameObj)
+          .Check();
+    }
+
+    result->Set(capture_from_isolate->GetCurrentContext(), key, jsFrames)
+        .Check();
   }
 
   args.GetReturnValue().Set(result);
