@@ -9,15 +9,9 @@ describe('e2e Tests', { timeout: 20000 }, () => {
     const testFile = join(__dirname, 'stack-traces.js');
     const result = spawnSync('node', [testFile])
 
-    let stacks;
-    try {
-      stacks = JSON.parse(result.stdout.toString());
-    } catch (e) {
-      console.log('status', result.status);
-      console.log('stdout', result.stdout.toString());
-      console.log('stderr', result.stderr.toString());
-      throw e;
-    }
+    expect(result.status).toEqual(0);
+
+    const stacks = JSON.parse(result.stdout.toString());
 
     expect(stacks['0']).toEqual(expect.arrayContaining([
       {
@@ -66,15 +60,9 @@ describe('e2e Tests', { timeout: 20000 }, () => {
     const testFile = join(__dirname, 'stalled.js');
     const result = spawnSync('node', [testFile]);
 
-    let stacks;
-    try {
-      stacks = JSON.parse(result.stdout.toString());
-    } catch (e) {
-      console.log('status', result.status);
-      console.log('stdout', result.stdout.toString());
-      console.log('stderr', result.stderr.toString());
-      throw e;
-    }
+    expect(result.status).toEqual(0);
+
+    const stacks = JSON.parse(result.stdout.toString());
 
     expect(stacks['0']).toEqual(expect.arrayContaining([
       {
