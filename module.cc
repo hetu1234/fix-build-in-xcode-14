@@ -89,6 +89,7 @@ JsStackTrace CaptureStackTrace(Isolate *isolate) {
 // Function to capture stack traces from all registered threads
 void CaptureStackTraces(const FunctionCallbackInfo<Value> &args) {
   auto capture_from_isolate = args.GetIsolate();
+  auto current_context = capture_from_isolate->GetCurrentContext();
 
   using ThreadResult = std::tuple<std::string, JsStackTrace>;
   std::vector<std::future<ThreadResult>> futures;
@@ -117,13 +118,12 @@ void CaptureStackTraces(const FunctionCallbackInfo<Value> &args) {
                                    NewStringType::kNormal)
                    .ToLocalChecked();
 
-    Local<Array> jsFrames =
-        Array::New(capture_from_isolate, static_cast<int>(frames.size()));
+    Local<Array> jsFrames = Array::New(capture_from_isolate, frames.size());
     for (size_t i = 0; i < frames.size(); ++i) {
       const auto &f = frames[i];
       Local<Object> frameObj = Object::New(capture_from_isolate);
       frameObj
-          ->Set(capture_from_isolate->GetCurrentContext(),
+          ->Set(current_context,
                 String::NewFromUtf8(capture_from_isolate, "function",
                                     NewStringType::kInternalized)
                     .ToLocalChecked(),
@@ -133,7 +133,7 @@ void CaptureStackTraces(const FunctionCallbackInfo<Value> &args) {
                     .ToLocalChecked())
           .Check();
       frameObj
-          ->Set(capture_from_isolate->GetCurrentContext(),
+          ->Set(current_context,
                 String::NewFromUtf8(capture_from_isolate, "filename",
                                     NewStringType::kInternalized)
                     .ToLocalChecked(),
@@ -142,27 +142,24 @@ void CaptureStackTraces(const FunctionCallbackInfo<Value> &args) {
                     .ToLocalChecked())
           .Check();
       frameObj
-          ->Set(capture_from_isolate->GetCurrentContext(),
+          ->Set(current_context,
                 String::NewFromUtf8(capture_from_isolate, "lineno",
                                     NewStringType::kInternalized)
                     .ToLocalChecked(),
                 Integer::New(capture_from_isolate, f.lineno))
           .Check();
       frameObj
-          ->Set(capture_from_isolate->GetCurrentContext(),
+          ->Set(current_context,
                 String::NewFromUtf8(capture_from_isolate, "colno",
                                     NewStringType::kInternalized)
                     .ToLocalChecked(),
                 Integer::New(capture_from_isolate, f.colno))
           .Check();
-      jsFrames
-          ->Set(capture_from_isolate->GetCurrentContext(),
-                static_cast<uint32_t>(i), frameObj)
+      jsFrames->Set(current_context, static_cast<uint32_t>(i), frameObj)
           .Check();
     }
 
-    result->Set(capture_from_isolate->GetCurrentContext(), key, jsFrames)
-        .Check();
+    result->Set(current_context, key, jsFrames).Check();
   }
 
   args.GetReturnValue().Set(result);
