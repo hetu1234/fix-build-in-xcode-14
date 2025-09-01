@@ -2,6 +2,7 @@
 #include <future>
 #include <mutex>
 #include <node.h>
+#include <unordered_map>
 
 // Platform-specific includes for time functions
 #ifdef _WIN32
